@@ -249,40 +249,39 @@ output "instance_username" {
 }
 
 # ===================================
-# Alternative: Separate Webhook Notification Resource
+# Webhook Notification Resource
 # ===================================
 
-# This approach uses null_resource for more control over webhook notifications
-# resource "null_resource" "webhook_notification" {
-#   count = var.webhook_enabled ? 1 : 0
+ resource "null_resource" "webhook_notification" {
+   count = var.webhook_enabled ? 1 : 0
 
-#   depends_on = [aws_instance.rhel]
+   depends_on = [aws_instance.rhel]
 
-#   # Trigger on instance changes
-#   triggers = {
-#     instance_id = aws_instance.rhel.id
-#     instance_ip = aws_instance.rhel.public_ip
-#   }
+   # Trigger on instance changes
+   triggers = {
+     instance_id = aws_instance.rhel.id
+     instance_ip = aws_instance.rhel.public_ip
+   }
 
-#   # Send notification after instance is ready
-#   provisioner "local-exec" {
-#     environment = {
-#       API_TOKEN = var.api_token
-#     }
-#     command = <<-EOT
-#       curl -X POST ${var.webhook_url} \
-#         -H "Content-Type: application/json" \
-#         ${var.api_token != "" ? "-H \"Authorization: Bearer $API_TOKEN\"" : ""} \
-#         -d '{
-#           "event": "terraform_apply",
-#           "resource_type": "aws_instance",
-#           "instance_id": "${aws_instance.rhel.id}",
-#           "instance_ip": "${aws_instance.rhel.public_ip}",
-#           "instance_dns": "${aws_instance.rhel.public_dns}",
-#           "instance_name": "${var.instance_name}",
-#           "region": "${var.aws_region}",
-#           "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-#         }'
-#     EOT
-#   }
-# }
+   # Send notification after instance is ready
+   provisioner "local-exec" {
+     environment = {
+       API_TOKEN = var.api_token
+     }
+     command = <<-EOT
+       curl -X POST ${var.webhook_url} \
+         -H "Content-Type: application/json" \
+         ${var.api_token != "" ? "-H \"Authorization: Bearer $API_TOKEN\"" : ""} \
+         -d '{
+           "event": "terraform_apply",
+           "resource_type": "aws_instance",
+           "instance_id": "${aws_instance.rhel.id}",
+           "instance_ip": "${aws_instance.rhel.public_ip}",
+           "instance_dns": "${aws_instance.rhel.public_dns}",
+           "instance_name": "${var.instance_name}",
+           "region": "${var.aws_region}",
+           "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+         }'
+    EOT
+   }
+ }
