@@ -1,3 +1,83 @@
+# ===================================
+# Variables
+# ===================================
+
+# AWS Credentials (Optional - can use AWS CLI, environment vars, or dynamic credentials)
+variable "aws_access_key" {
+  description = "AWS Access Key ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_secret_key" {
+  description = "AWS Secret Access Key"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+# EC2 Instance Configuration
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "rhel_ami" {
+  description = "RHEL AMI ID for the specified region"
+  type        = string
+  default     = "ami-0583d8c7a9c35822c"  # RHEL 9 in us-east-1
+}
+
+# SSH Key Configuration
+variable "key_name" {
+  description = "Name of the AWS key pair for SSH access"
+  type        = string
+}
+
+variable "ssh_public_key" {
+  description = "Public SSH key content (optional - only if creating new key pair)"
+  type        = string
+  default     = ""
+}
+
+variable "create_new_key_pair" {
+  description = "Whether to create a new key pair or use existing"
+  type        = bool
+  default     = false
+}
+
+# Machine/Instance Credentials
+variable "instance_username" {
+  description = "Default username for RHEL instance"
+  type        = string
+  default     = "ec2-user"
+}
+
+# Security Configuration
+variable "ssh_allowed_cidr" {
+  description = "CIDR blocks allowed to SSH (leave as 0.0.0.0/0 for all, or restrict to your IP)"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "instance_name" {
+  description = "Name tag for the EC2 instance"
+  type        = string
+  default     = "rhel-instance"
+}
+
+# ===================================
+# Terraform & Provider Configuration
+# ===================================
+
 terraform {
   required_providers {
     aws = {
@@ -8,10 +88,29 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1"  # Change to your preferred region
+  region     = var.aws_region
+  access_key = var.aws_access_key != "" ? var.aws_access_key : null
+  secret_key = var.aws_secret_key != "" ? var.aws_secret_key : null
 }
 
+# ===================================
+# SSH Key Pair (Optional Creation)
+# ===================================
+
+resource "aws_key_pair" "rhel_key" {
+  count      = var.create_new_key_pair ? 1 : 0
+  key_name   = var.key_name
+  public_key = var.ssh_public_key
+
+  tags = {
+    Name = "${var.key_name}"
+  }
+}
+
+# ===================================
 # Security Group
+# ===================================
+
 resource "aws_security_group" "rhel_sg" {
   name        = "rhel-instance-sg"
   description = "Security group for RHEL instance with SSH, HTTP, and HTTPS"
@@ -21,7 +120,7 @@ resource "aws_security_group" "rhel_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # Consider restricting to your IP
+    cidr_blocks = var.ssh_allowed_cidr
   }
 
   ingress {
@@ -53,29 +152,48 @@ resource "aws_security_group" "rhel_sg" {
   }
 }
 
+# ===================================
 # EC2 Instance
+# ===================================
+
 resource "aws_instance" "rhel" {
-  ami           = "ami-0583d8c7a9c35822c"  # RHEL 9 in us-east-1 - Update for your region
-  instance_type = "t3.micro"
+  ami           = var.rhel_ami
+  instance_type = var.instance_type
   
   vpc_security_group_ids = [aws_security_group.rhel_sg.id]
   
-  key_name = "your-key-pair"  # Replace with your SSH key pair name
+  key_name = var.key_name
 
   tags = {
-    Name = "rhel-instance"
+    Name = var.instance_name
   }
 }
 
+# ===================================
 # Outputs
+# ===================================
+
 output "instance_id" {
-  value = aws_instance.rhel.id
+  description = "The ID of the EC2 instance"
+  value       = aws_instance.rhel.id
 }
 
 output "instance_public_ip" {
-  value = aws_instance.rhel.public_ip
+  description = "Public IP address of the instance"
+  value       = aws_instance.rhel.public_ip
 }
 
 output "instance_public_dns" {
-  value = aws_instance.rhel.public_dns
+  description = "Public DNS name of the instance"
+  value       = aws_instance.rhel.public_dns
+}
+
+output "ssh_connection_command" {
+  description = "SSH command to connect to the instance"
+  value       = "ssh -i /path/to/${var.key_name}.pem ${var.instance_username}@${aws_instance.rhel.public_ip}"
+}
+
+output "instance_username" {
+  description = "Default username for SSH connection"
+  value       = var.instance_username
 }
