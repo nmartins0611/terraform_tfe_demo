@@ -75,24 +75,24 @@ variable "instance_name" {
 }
 
 # Webhook/API Configuration
-# variable "webhook_url" {
-#   description = "URL of the webhook/API endpoint to notify"
-#   type        = string
-#   default     = "http://endpoint:5000/api/notify"
-# }
+variable "webhook_url" {
+  description = "URL of the webhook/API endpoint to notify"
+  type        = string
+  default     = "http://endpoint:5000/api/notify"
+}
 
-# variable "webhook_enabled" {
-#   description = "Enable or disable webhook notifications"
-#   type        = bool
-#   default     = true
-# }
+variable "webhook_enabled" {
+  description = "Enable or disable webhook notifications"
+  type        = bool
+  default     = true
+}
 
-# variable "api_token" {
-#   description = "API token for webhook authentication (if required)"
-#   type        = string
-#   default     = ""
-#   sensitive   = true
-# }
+variable "api_token" {
+  description = "API token for webhook authentication (if required)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
 
 # ===================================
 # Terraform & Provider Configuration
