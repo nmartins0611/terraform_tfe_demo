@@ -1,101 +1,103 @@
 # ===================================
-# Variables333333
-# ===================================##
+# TERRAFORM WITH OFFICIAL AAP PROVIDER
+# ===================================
 
-# AWS Credentials (Optional - can use AWS CLI, environment vars, or dynamic credentials)
-variable "aws_access_key" {
-  description = "AWS Access Key ID"
+# Variables
+variable "vault_address" {
+  description = "URL of the Vault server"
   type        = string
-  default     = ""
+  default     = "https://vault.example.com:8200"
+}
+
+variable "vault_role_id" {
+  description = "Vault AppRole Role ID"
+  type        = string
   sensitive   = true
 }
 
-variable "aws_secret_key" {
-  description = "AWS Secret Access Key"
+variable "vault_secret_id" {
+  description = "Vault AppRole Secret ID"
   type        = string
-  default     = ""
   sensitive   = true
 }
 
 variable "aws_region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
+  type    = string
+  default = "us-east-1"
 }
 
-# EC2 Instance Configuration
 variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "t3.micro"
+  type    = string
+  default = "t3.micro"
 }
 
 variable "rhel_ami" {
-  description = "RHEL AMI ID for the specified region"
-  type        = string
-  default     = "ami-0583d8c7a9c35822c"  # RHEL 9 in us-east-1
+  type    = string
+  default = "ami-0583d8c7a9c35822c"
 }
 
-# SSH Key Configuration
 variable "key_name" {
-  description = "Name of the AWS key pair for SSH access"
+  description = "SSH key pair name"
   type        = string
-}
-
-variable "ssh_public_key" {
-  description = "Public SSH key content (optional - only if creating new key pair)"
-  type        = string
-  default     = ""
-}
-
-variable "create_new_key_pair" {
-  description = "Whether to create a new key pair or use existing"
-  type        = bool
-  default     = false
-}
-
-# Machine/Instance Credentials
-variable "instance_username" {
-  description = "Default username for RHEL instance"
-  type        = string
-  default     = "ec2-user"
-}
-
-# Security Configuration
-variable "ssh_allowed_cidr" {
-  description = "CIDR blocks allowed to SSH (leave as 0.0.0.0/0 for all, or restrict to your IP)"
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
 }
 
 variable "instance_name" {
-  description = "Name tag for the EC2 instance"
+  type    = string
+  default = "rhel-instance"
+}
+
+# AAP Configuration
+variable "aap_host" {
+  description = "Ansible Automation Platform URL"
   type        = string
-  default     = "rhel-instance"
+  default     = "https://ansible-tower.example.com"
 }
 
-# Webhook/API Configuration
-variable "webhook_url" {
-  description = "URL of the webhook/API endpoint to notify"
-  type        = string
-  default     = "http://endpoint:5000/api/notify"
-}
-
-variable "webhook_enabled" {
-  description = "Enable or disable webhook notifications"
-  type        = bool
-  default     = true
-}
-
-variable "api_token" {
-  description = "API token for webhook authentication (if required)"
+variable "aap_username" {
+  description = "AAP Username (optional if using token)"
   type        = string
   default     = ""
   sensitive   = true
 }
 
+variable "aap_password" {
+  description = "AAP Password (optional if using token)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aap_token" {
+  description = "AAP API Token (recommended over username/password)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aap_organization_id" {
+  description = "AAP Organization ID"
+  type        = number
+  default     = 1
+}
+
+variable "aap_job_template_id" {
+  description = "AAP Job Template ID to trigger"
+  type        = number
+}
+
+variable "aap_workflow_template_id" {
+  description = "AAP Workflow Template ID (if using workflow instead of job template)"
+  type        = number
+  default     = null
+}
+
+variable "ssh_allowed_cidr" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
 # ===================================
-# Terraform & Provider Configuration
+# Providers Configuration
 # ===================================
 
 terraform {
@@ -104,27 +106,81 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    vault = {
+      source  = "hashicorp/vault"
+      version = "~> 4.0"
+    }
+    aap = {
+      source  = "ansible/aap"
+      version = "~> 1.1"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 
+# Vault Provider
+provider "vault" {
+  address = var.vault_address
+  
+  auth_login {
+    path = "auth/approle/login"
+    parameters = {
+      role_id   = var.vault_role_id
+      secret_id = var.vault_secret_id
+    }
+  }
+}
+
+# Fetch secrets from Vault
+data "vault_kv_secret_v2" "aws_creds" {
+  mount = "secret"
+  name  = "aws/credentials"
+}
+
+data "vault_kv_secret_v2" "aap_token" {
+  mount = "secret"
+  name  = "ansible/tower_token"
+}
+
+# AWS Provider
 provider "aws" {
   region     = var.aws_region
-  access_key = var.aws_access_key != "" ? var.aws_access_key : null
-  secret_key = var.aws_secret_key != "" ? var.aws_secret_key : null
+  access_key = data.vault_kv_secret_v2.aws_creds.data["access_key"]
+  secret_key = data.vault_kv_secret_v2.aws_creds.data["secret_key"]
+}
+
+# AAP Provider
+provider "aap" {
+  host                 = var.aap_host
+  username             = var.aap_username != "" ? var.aap_username : null
+  password             = var.aap_password != "" ? var.aap_password : null
+  token                = var.aap_token != "" ? var.aap_token : data.vault_kv_secret_v2.aap_token.data["token"]
+  insecure_skip_verify = false  # Set to true for self-signed certificates in dev
 }
 
 # ===================================
-# SSH Key Pair (Optional Creation)
+# Generate Instance Password
 # ===================================
 
-resource "aws_key_pair" "rhel_key" {
-  count      = var.create_new_key_pair ? 1 : 0
-  key_name   = var.key_name
-  public_key = var.ssh_public_key
+resource "random_password" "instance_password" {
+  length  = 16
+  special = true
+}
 
-  tags = {
-    Name = "${var.key_name}"
-  }
+# Store password in Vault
+resource "vault_kv_secret_v2" "instance_password" {
+  mount = "secret"
+  name  = "instances/${aws_instance.rhel.id}/credentials"
+  
+  data_json = jsonencode({
+    username = "ec2-user"
+    password = random_password.instance_password.result
+    hostname = aws_instance.rhel.public_ip
+    instance_id = aws_instance.rhel.id
+  })
 }
 
 # ===================================
@@ -132,8 +188,8 @@ resource "aws_key_pair" "rhel_key" {
 # ===================================
 
 resource "aws_security_group" "rhel_sg" {
-  name        = "rhel-instance-sg"
-  description = "Security group for RHEL instance with SSH, HTTP, and HTTPS"
+  name        = "${var.instance_name}-sg"
+  description = "Security group for RHEL instance"
 
   ingress {
     description = "SSH"
@@ -160,7 +216,6 @@ resource "aws_security_group" "rhel_sg" {
   }
 
   egress {
-    description = "Allow all outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -168,7 +223,7 @@ resource "aws_security_group" "rhel_sg" {
   }
 
   tags = {
-    Name = "rhel-security-group"
+    Name = "${var.instance_name}-sg"
   }
 }
 
@@ -177,111 +232,161 @@ resource "aws_security_group" "rhel_sg" {
 # ===================================
 
 resource "aws_instance" "rhel" {
-  ami           = var.rhel_ami
-  instance_type = var.instance_type
-  
+  ami                    = var.rhel_ami
+  instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.rhel_sg.id]
-  
-  key_name = var.key_name
+  key_name               = var.key_name
+
+  # Set password for ec2-user via user_data
+  user_data = <<-EOF
+              #!/bin/bash
+              echo "ec2-user:${random_password.instance_password.result}" | chpasswd
+              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+              systemctl restart sshd
+              EOF
 
   tags = {
-    Name = var.instance_name
+    Name        = var.instance_name
+    Environment = "terraform-managed"
+    ManagedBy   = "terraform"
   }
-
-  # Send webhook notification after instance is created
-  # provisioner "local-exec" {
-  #   command = <<-EOT
-  #     curl -X POST http://endpoint:5000/api/notify \
-  #       -H "Content-Type: application/json" \
-  #       -d '{
-  #         "event": "instance_created",
-  #         "instance_id": "${self.id}",
-  #         "instance_ip": "${self.public_ip}",
-  #         "instance_name": "${var.instance_name}",
-  #         "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-  #       }'
-  #   EOT
-  # }
-
-  # Send webhook notification when instance is destroyed
-  # provisioner "local-exec" {
-  #   when    = destroy
-  #   command = <<-EOT
-  #     curl -X POST http://endpoint:5000/api/notify \
-  #       -H "Content-Type: application/json" \
-  #       -d '{
-  #         "event": "instance_destroyed",
-  #         "instance_id": "${self.id}",
-  #         "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-  #       }'
-  #   EOT
-  #   on_failure = continue
-  # }
 }
+
+# ===================================
+# AAP Integration - Create Inventory
+# ===================================
+
+# Create a dedicated inventory in AAP for this infrastructure
+resource "aap_inventory" "terraform_inventory" {
+  name         = "Terraform-Managed-${var.instance_name}"
+  description  = "Dynamically managed inventory from Terraform"
+  organization = var.aap_organization_id
+  
+  variables = jsonencode({
+    terraform_workspace = terraform.workspace
+    created_at         = timestamp()
+  })
+}
+
+# Add the EC2 instance to AAP inventory
+resource "aap_host" "rhel_host" {
+  name         = aws_instance.rhel.public_ip
+  inventory_id = aap_inventory.terraform_inventory.id
+  
+  variables = jsonencode({
+    ansible_host     = aws_instance.rhel.public_ip
+    instance_id      = aws_instance.rhel.id
+    instance_name    = var.instance_name
+    vault_path       = "secret/data/instances/${aws_instance.rhel.id}/credentials"
+    aws_region       = var.aws_region
+    private_ip       = aws_instance.rhel.private_ip
+  })
+
+  depends_on = [vault_kv_secret_v2.instance_password]
+}
+
+# Optional: Create a group for organizing hosts
+resource "aap_group" "rhel_group" {
+  name         = "rhel-servers"
+  inventory_id = aap_inventory.terraform_inventory.id
+  
+  variables = jsonencode({
+    os_family = "RedHat"
+    managed_by = "terraform"
+  })
+}
+
+# ===================================
+# AAP Integration - Launch Job Template
+# ===================================
+
+# Launch an AAP Job Template to configure the instance
+resource "aap_job" "configure_instance" {
+  job_template_id = var.aap_job_template_id
+  inventory_id    = aap_inventory.terraform_inventory.id
+  
+  # Pass extra variables to the Ansible playbook
+  extra_vars = jsonencode({
+    target_host    = aws_instance.rhel.public_ip
+    instance_id    = aws_instance.rhel.id
+    vault_path     = "secret/data/instances/${aws_instance.rhel.id}/credentials"
+    instance_name  = var.instance_name
+  })
+
+  depends_on = [
+    aap_host.rhel_host,
+    vault_kv_secret_v2.instance_password
+  ]
+}
+
+# ===================================
+# ALTERNATIVE: Launch Workflow Template
+# ===================================
+
+# If you want to use a workflow template instead of a job template,
+# use this resource (requires AAP provider >= 1.1.0)
+
+# resource "aap_workflow_job" "configure_workflow" {
+#   workflow_template_id = var.aap_workflow_template_id
+#   inventory_id         = aap_inventory.terraform_inventory.id
+#   
+#   extra_vars = jsonencode({
+#     target_host   = aws_instance.rhel.public_ip
+#     instance_id   = aws_instance.rhel.id
+#     vault_path    = "secret/data/instances/${aws_instance.rhel.id}/credentials"
+#   })
+#
+#   depends_on = [
+#     aap_host.rhel_host,
+#     vault_kv_secret_v2.instance_password
+#   ]
+# }
 
 # ===================================
 # Outputs
 # ===================================
 
 output "instance_id" {
-  description = "The ID of the EC2 instance"
+  description = "EC2 Instance ID"
   value       = aws_instance.rhel.id
 }
 
 output "instance_public_ip" {
-  description = "Public IP address of the instance"
+  description = "Public IP address"
   value       = aws_instance.rhel.public_ip
 }
 
-output "instance_public_dns" {
-  description = "Public DNS name of the instance"
-  value       = aws_instance.rhel.public_dns
+output "instance_private_ip" {
+  description = "Private IP address"
+  value       = aws_instance.rhel.private_ip
+}
+
+output "vault_secret_path" {
+  description = "Vault path where credentials are stored"
+  value       = "secret/instances/${aws_instance.rhel.id}/credentials"
+}
+
+output "aap_inventory_id" {
+  description = "AAP Inventory ID"
+  value       = aap_inventory.terraform_inventory.id
+}
+
+output "aap_host_id" {
+  description = "AAP Host ID"
+  value       = aap_host.rhel_host.id
+}
+
+output "aap_job_id" {
+  description = "AAP Job ID that was launched"
+  value       = aap_job.configure_instance.id
+}
+
+output "aap_job_status" {
+  description = "AAP Job execution status"
+  value       = aap_job.configure_instance.status
 }
 
 output "ssh_connection_command" {
-  description = "SSH command to connect to the instance"
-  value       = "ssh -i /path/to/${var.key_name}.pem ${var.instance_username}@${aws_instance.rhel.public_ip}"
+  description = "SSH command to connect"
+  value       = "ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_instance.rhel.public_ip}"
 }
-
-output "instance_username" {
-  description = "Default username for SSH connection"
-  value       = var.instance_username
-}
-
-# ===================================
-# Webhook Notification Resource
-# ===================================
-
- resource "null_resource" "webhook_notification" {
-   count = var.webhook_enabled ? 1 : 0
-
-   depends_on = [aws_instance.rhel]
-
-   # Trigger on instance changes
-   triggers = {
-     instance_id = aws_instance.rhel.id
-     instance_ip = aws_instance.rhel.public_ip
-   }
-
-   # Send notification after instance is ready
-   provisioner "local-exec" {
-     environment = {
-       API_TOKEN = var.api_token
-     }
-     command = <<-EOT
-       curl -X POST ${var.webhook_url} \
-         -H "Content-Type: application/json" \
-         ${var.api_token != "" ? "-H \"Authorization: Bearer $API_TOKEN\"" : ""} \
-         -d '{
-           "event": "terraform_apply",
-           "resource_type": "aws_instance",
-           "instance_id": "${aws_instance.rhel.id}",
-           "instance_ip": "${aws_instance.rhel.public_ip}",
-           "instance_dns": "${aws_instance.rhel.public_dns}",
-           "instance_name": "${var.instance_name}",
-           "region": "${var.aws_region}",
-           "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-         }'
-    EOT
-   }
- }
