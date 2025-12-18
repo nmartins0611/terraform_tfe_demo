@@ -1,106 +1,9 @@
-# ===================================
-# TERRAFORM WITH OFFICIAL AAP PROVIDER
-# ===================================
-
-# Variables
-variable "vault_address" {
-  description = "URL of the Vault server"
-  type        = string
-  default     = "https://vault.example.com:8200"
-}
-
-variable "vault_role_id" {
-  description = "Vault AppRole Role ID"
-  type        = string
-  sensitive   = true
-}
-
-variable "vault_secret_id" {
-  description = "Vault AppRole Secret ID"
-  type        = string
-  sensitive   = true
-}
-
-variable "aws_region" {
-  type    = string
-  default = "us-east-1"
-}
-
-variable "instance_type" {
-  type    = string
-  default = "t3.micro"
-}
-
-variable "rhel_ami" {
-  type    = string
-  default = "ami-0583d8c7a9c35822c"
-}
-
-variable "key_name" {
-  description = "SSH key pair name"
-  type        = string
-}
-
-variable "instance_name" {
-  type    = string
-  default = "rhel-instance"
-}
-
-# AAP Configuration
-variable "aap_host" {
-  description = "Ansible Automation Platform URL"
-  type        = string
-  default     = "https://ansible-tower.example.com"
-}
-
-variable "aap_username" {
-  description = "AAP Username (optional if using token)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "aap_password" {
-  description = "AAP Password (optional if using token)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "aap_token" {
-  description = "AAP API Token (recommended over username/password)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "aap_organization_id" {
-  description = "AAP Organization ID"
-  type        = number
-  default     = 1
-}
-
-variable "aap_job_template_id" {
-  description = "AAP Job Template ID to trigger"
-  type        = number
-}
-
-variable "aap_workflow_template_id" {
-  description = "AAP Workflow Template ID (if using workflow instead of job template)"
-  type        = number
-  default     = null
-}
-
-variable "ssh_allowed_cidr" {
-  type    = list(string)
-  default = ["0.0.0.0/0"]
-}
-
-# ===================================
-# Providers Configuration
-# ===================================
+################################################################################
+# main.tf - Main Terraform Configuration
+################################################################################
 
 terraform {
+  required_version = ">= 1.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -108,285 +11,575 @@ terraform {
     }
     vault = {
       source  = "hashicorp/vault"
-      version = "~> 4.0"
-    }
-    aap = {
-      source  = "ansible/aap"
-      version = "~> 1.1"
+      version = "~> 3.0"
     }
     random = {
       source  = "hashicorp/random"
-      version = "~> 3.5"
+      version = "~> 3.0"
+    }
+    ansible = {
+      source  = "ansible/ansible"
+      version = "~> 1.3.0"
     }
   }
 }
 
-# Vault Provider
+################################################################################
+# Vault Provider Configuration
+################################################################################
+
 provider "vault" {
-  address = var.vault_address
-  
-  auth_login {
-    path = "auth/approle/login"
-    parameters = {
-      role_id   = var.vault_role_id
-      secret_id = var.vault_secret_id
-    }
-  }
+  # Address and token configured via environment variables:
+  # VAULT_ADDR and VAULT_TOKEN in TFE workspace
 }
 
-# Fetch secrets from Vault
+################################################################################
+# Data Sources - AWS Static Credentials from Vault
+################################################################################
+
 data "vault_kv_secret_v2" "aws_creds" {
-  mount = "secret"
+  mount = var.vault_kv_mount
   name  = "aws/credentials"
 }
 
-data "vault_kv_secret_v2" "aap_token" {
-  mount = "secret"
-  name  = "ansible/tower_token"
-}
+################################################################################
+# AWS Provider Configuration using Vault Static Credentials
+################################################################################
 
-# AWS Provider
 provider "aws" {
   region     = var.aws_region
   access_key = data.vault_kv_secret_v2.aws_creds.data["access_key"]
   secret_key = data.vault_kv_secret_v2.aws_creds.data["secret_key"]
 }
 
-# AAP Provider
-provider "aap" {
-  host                 = var.aap_host
-  username             = var.aap_username != "" ? var.aap_username : null
-  password             = var.aap_password != "" ? var.aap_password : null
-  token                = var.aap_token != "" ? var.aap_token : data.vault_kv_secret_v2.aap_token.data["token"]
-  insecure_skip_verify = false  # Set to true for self-signed certificates in dev
-}
-
-# ===================================
-# Generate Instance Password
-# ===================================
+################################################################################
+# Random Password Generation
+################################################################################
 
 resource "random_password" "instance_password" {
-  length  = 16
+  length  = 24
   special = true
+  lower   = true
+  upper   = true
+  numeric = true
 }
 
-# Store password in Vault
-resource "vault_kv_secret_v2" "instance_password" {
-  mount = "secret"
-  name  = "instances/${aws_instance.rhel.id}/credentials"
+################################################################################
+# Store Password in Vault
+################################################################################
+
+resource "vault_kv_secret_v2" "instance_credentials" {
+  mount = var.vault_kv_mount
+  name  = "rhel-instance-${var.instance_name}"
   
   data_json = jsonencode({
-    username = "ec2-user"
-    password = random_password.instance_password.result
-    hostname = aws_instance.rhel.public_ip
+    username    = var.instance_username
+    password    = random_password.instance_password.result
     instance_id = aws_instance.rhel.id
+    public_ip   = aws_instance.rhel.public_ip
+    private_ip  = aws_instance.rhel.private_ip
   })
 }
 
-# ===================================
+################################################################################
+# VPC and Networking
+################################################################################
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+################################################################################
 # Security Group
-# ===================================
+################################################################################
 
 resource "aws_security_group" "rhel_sg" {
-  name        = "${var.instance_name}-sg"
-  description = "Security group for RHEL instance"
+  name_prefix = "${var.instance_name}-sg-"
+  description = "Security group for RHEL instance - SSH, HTTP, HTTPS"
+  vpc_id      = data.aws_vpc.default.id
 
+  # SSH
   ingress {
-    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = var.ssh_allowed_cidr
+    cidr_blocks = var.allowed_ssh_cidrs
+    description = "SSH access"
   }
 
+  # HTTP
   ingress {
-    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_web_cidrs
+    description = "HTTP access"
   }
 
+  # HTTPS
   ingress {
-    description = "HTTPS"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_web_cidrs
+    description = "HTTPS access"
   }
 
+  # Outbound traffic
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
   }
 
   tags = {
-    Name = "${var.instance_name}-sg"
+    Name        = "${var.instance_name}-sg"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
-# ===================================
+################################################################################
+# Find Latest RHEL AMI
+################################################################################
+
+data "aws_ami" "rhel" {
+  most_recent = true
+  owners      = ["309956199498"] # Red Hat's official AWS account
+
+  filter {
+    name   = "name"
+    values = ["RHEL-${var.rhel_version}*"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+################################################################################
+# EC2 Key Pair (optional - for initial access)
+################################################################################
+
+resource "aws_key_pair" "rhel_key" {
+  count      = var.create_key_pair ? 1 : 0
+  key_name   = "${var.instance_name}-key"
+  public_key = var.ssh_public_key
+
+  tags = {
+    Name        = "${var.instance_name}-key"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+################################################################################
+# User Data Script
+################################################################################
+
+locals {
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    
+    # Log all output
+    exec > >(tee /var/log/user-data.log)
+    exec 2>&1
+    
+    echo "Starting user-data script at $(date)"
+    
+    # Set root password
+    echo "root:${random_password.instance_password.result}" | chpasswd
+    echo "Root password set successfully"
+    
+    # Create user if not root
+    if [ "${var.instance_username}" != "root" ]; then
+      # Check if user already exists
+      if ! id -u ${var.instance_username} > /dev/null 2>&1; then
+        useradd -m -s /bin/bash ${var.instance_username}
+        echo "User ${var.instance_username} created"
+      fi
+      
+      # Set password
+      echo "${var.instance_username}:${random_password.instance_password.result}" | chpasswd
+      echo "Password set for ${var.instance_username}"
+      
+      # Add to sudoers
+      echo "${var.instance_username} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${var.instance_username}
+      chmod 0440 /etc/sudoers.d/${var.instance_username}
+      echo "Sudo access granted to ${var.instance_username}"
+    fi
+    
+    # Enable password authentication for SSH
+    sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    
+    # Ensure password authentication is enabled
+    if ! grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config; then
+      echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+    fi
+    
+    # Restart SSH
+    systemctl restart sshd
+    echo "SSH configured and restarted"
+    
+    # Update system (optional - can be commented out for faster deployment)
+    # yum update -y
+    
+    echo "User-data script completed at $(date)"
+  EOF
+}
+
+################################################################################
 # EC2 Instance
-# ===================================
+################################################################################
 
 resource "aws_instance" "rhel" {
-  ami                    = var.rhel_ami
-  instance_type          = var.instance_type
+  ami           = data.aws_ami.rhel.id
+  instance_type = var.instance_type
+  subnet_id     = data.aws_subnets.default.ids[0]
+  
+  key_name               = var.create_key_pair ? aws_key_pair.rhel_key[0].key_name : var.existing_key_name
   vpc_security_group_ids = [aws_security_group.rhel_sg.id]
-  key_name               = var.key_name
+  
+  user_data                   = local.user_data
+  user_data_replace_on_change = true
 
-  # Set password for ec2-user via user_data
-  user_data = <<-EOF
-              #!/bin/bash
-              echo "ec2-user:${random_password.instance_password.result}" | chpasswd
-              sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-              systemctl restart sshd
-              EOF
+  root_block_device {
+    volume_type = var.root_volume_type
+    volume_size = var.root_volume_size
+    encrypted   = true
+    tags = {
+      Name = "${var.instance_name}-root"
+    }
+  }
 
   tags = {
     Name        = var.instance_name
-    Environment = "terraform-managed"
-    ManagedBy   = "terraform"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+    Application = "WebServer"
   }
+
+  # Wait for instance to be ready
+  depends_on = [aws_security_group.rhel_sg]
 }
 
-# ===================================
-# AAP Integration - Create Inventory
-# ===================================
+################################################################################
+# Ansible Provider Configuration for AAP
+################################################################################
 
-# Create a dedicated inventory in AAP for this infrastructure
-resource "aap_inventory" "terraform_inventory" {
-  name         = "Terraform-Managed-${var.instance_name}"
-  description  = "Dynamically managed inventory from Terraform"
-  organization = var.aap_organization_id
-  
-  variables = jsonencode({
-    terraform_workspace = terraform.workspace
-    created_at         = timestamp()
-  })
+provider "ansible" {
+  # No configuration needed - uses environment variables or resource-level config
 }
 
-# Add the EC2 instance to AAP inventory
-resource "aap_host" "rhel_host" {
-  name         = aws_instance.rhel.public_ip
-  inventory_id = aap_inventory.terraform_inventory.id
-  
-  variables = jsonencode({
-    ansible_host     = aws_instance.rhel.public_ip
-    instance_id      = aws_instance.rhel.id
-    instance_name    = var.instance_name
-    vault_path       = "secret/data/instances/${aws_instance.rhel.id}/credentials"
-    aws_region       = var.aws_region
-    private_ip       = aws_instance.rhel.private_ip
-  })
+################################################################################
+# Wait for Instance to be Ready
+################################################################################
 
-  depends_on = [vault_kv_secret_v2.instance_password]
+resource "time_sleep" "wait_for_instance" {
+  depends_on = [aws_instance.rhel]
+  
+  create_duration = "90s"  # Wait for user_data to complete
 }
 
-# Optional: Create a group for organizing hosts
-resource "aap_group" "rhel_group" {
-  name         = "rhel-servers"
-  inventory_id = aap_inventory.terraform_inventory.id
-  
-  variables = jsonencode({
-    os_family = "RedHat"
-    managed_by = "terraform"
-  })
-}
+################################################################################
+# Trigger AAP Workflow using Ansible Provider
+################################################################################
 
-# ===================================
-# AAP Integration - Launch Job Template
-# ===================================
+resource "ansible_job_template_launch" "apache_install" {
+  count = var.trigger_aap_workflow ? 1 : 0
 
-# Launch an AAP Job Template to configure the instance
-resource "aap_job" "configure_instance" {
-  job_template_id = var.aap_job_template_id
-  inventory_id    = aap_inventory.terraform_inventory.id
+  job_template_id = var.aap_workflow_template_id
   
-  # Pass extra variables to the Ansible playbook
+  inventory_id = var.aap_inventory_id
+  
   extra_vars = jsonencode({
-    target_host    = aws_instance.rhel.public_ip
-    instance_id    = aws_instance.rhel.id
-    vault_path     = "secret/data/instances/${aws_instance.rhel.id}/credentials"
-    instance_name  = var.instance_name
+    target_host     = aws_instance.rhel.public_ip
+    vault_addr      = var.vault_addr
+    vault_token     = var.vault_token
+    vault_path      = "secret/data/rhel-instance-${var.instance_name}"
+    instance_id     = aws_instance.rhel.id
+    instance_name   = var.instance_name
+    ansible_host    = aws_instance.rhel.public_ip
   })
+
+  # AAP connection details
+  controller_url   = var.aap_server_url
+  controller_token = var.aap_token
+  
+  # Allow self-signed certificates
+  insecure = var.aap_insecure_tls
 
   depends_on = [
-    aap_host.rhel_host,
-    vault_kv_secret_v2.instance_password
+    vault_kv_secret_v2.instance_credentials,
+    time_sleep.wait_for_instance
   ]
 }
 
-# ===================================
-# ALTERNATIVE: Launch Workflow Template
-# ===================================
+################################################################################
+# variables.tf - Variable Definitions
+################################################################################
 
-# If you want to use a workflow template instead of a job template,
-# use this resource (requires AAP provider >= 1.1.0)
+# Vault Variables
+variable "vault_kv_mount" {
+  description = "Vault KV v2 mount path where secrets are stored"
+  type        = string
+  default     = "secret"
+}
 
-# resource "aap_workflow_job" "configure_workflow" {
-#   workflow_template_id = var.aap_workflow_template_id
-#   inventory_id         = aap_inventory.terraform_inventory.id
-#   
-#   extra_vars = jsonencode({
-#     target_host   = aws_instance.rhel.public_ip
-#     instance_id   = aws_instance.rhel.id
-#     vault_path    = "secret/data/instances/${aws_instance.rhel.id}/credentials"
-#   })
-#
-#   depends_on = [
-#     aap_host.rhel_host,
-#     vault_kv_secret_v2.instance_password
-#   ]
-# }
+# AWS Variables
+variable "aws_region" {
+  description = "AWS region for deployment"
+  type        = string
+  default     = "us-east-1"
+}
 
-# ===================================
-# Outputs
-# ===================================
+variable "instance_name" {
+  description = "Name for the EC2 instance (used in tags and Vault path)"
+  type        = string
+  default     = "rhel-webserver"
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.medium"
+  
+  validation {
+    condition     = can(regex("^t[2-3]\\.(nano|micro|small|medium|large|xlarge|2xlarge)$", var.instance_type))
+    error_message = "Instance type must be a valid t2 or t3 instance type."
+  }
+}
+
+variable "rhel_version" {
+  description = "RHEL major version to deploy (8 or 9)"
+  type        = string
+  default     = "9"
+  
+  validation {
+    condition     = contains(["8", "9"], var.rhel_version)
+    error_message = "RHEL version must be either 8 or 9."
+  }
+}
+
+variable "environment" {
+  description = "Environment tag (dev, staging, production)"
+  type        = string
+  default     = "production"
+  
+  validation {
+    condition     = contains(["dev", "staging", "production"], var.environment)
+    error_message = "Environment must be dev, staging, or production."
+  }
+}
+
+# Storage Variables
+variable "root_volume_type" {
+  description = "Root volume type (gp3, gp2, io1, io2)"
+  type        = string
+  default     = "gp3"
+  
+  validation {
+    condition     = contains(["gp3", "gp2", "io1", "io2"], var.root_volume_type)
+    error_message = "Volume type must be gp3, gp2, io1, or io2."
+  }
+}
+
+variable "root_volume_size" {
+  description = "Root volume size in GB"
+  type        = number
+  default     = 50
+  
+  validation {
+    condition     = var.root_volume_size >= 10 && var.root_volume_size <= 1000
+    error_message = "Volume size must be between 10 and 1000 GB."
+  }
+}
+
+# Network Security Variables
+variable "allowed_ssh_cidrs" {
+  description = "List of CIDR blocks allowed to SSH to the instance"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "allowed_web_cidrs" {
+  description = "List of CIDR blocks allowed to access web ports (80, 443)"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+# SSH Key Variables
+variable "create_key_pair" {
+  description = "Whether to create a new SSH key pair"
+  type        = bool
+  default     = true
+}
+
+variable "ssh_public_key" {
+  description = "SSH public key content (required if create_key_pair is true)"
+  type        = string
+  default     = ""
+}
+
+variable "existing_key_name" {
+  description = "Existing AWS key pair name (used if create_key_pair is false)"
+  type        = string
+  default     = null
+}
+
+# Instance Credentials Variables
+variable "instance_username" {
+  description = "Username for the instance (will be created with sudo access)"
+  type        = string
+  default     = "ansible"
+  
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9_-]*$", var.instance_username))
+    error_message = "Username must start with a letter and contain only lowercase letters, numbers, hyphens, and underscores."
+  }
+}
+
+# AAP Variables
+variable "trigger_aap_workflow" {
+  description = "Whether to trigger AAP workflow after instance creation"
+  type        = bool
+  default     = true
+}
+
+variable "aap_server_url" {
+  description = "Ansible Automation Platform server URL (e.g., https://aap.example.com)"
+  type        = string
+}
+
+variable "aap_token" {
+  description = "AAP authentication token (Bearer token)"
+  type        = string
+  sensitive   = true
+}
+
+variable "aap_workflow_template_id" {
+  description = "AAP Workflow Job Template ID (numeric ID, not name)"
+  type        = string
+  default     = "7"
+  
+  validation {
+    condition     = can(regex("^[0-9]+$", var.aap_workflow_template_id))
+    error_message = "Workflow template ID must be numeric (e.g., '7', not 'Apache Installation Workflow')."
+  }
+}
+
+variable "aap_inventory_id" {
+  description = "AAP Inventory ID to use for the job (numeric ID)"
+  type        = string
+  default     = "1"
+  
+  validation {
+    condition     = can(regex("^[0-9]+$", var.aap_inventory_id))
+    error_message = "Inventory ID must be numeric (e.g., '1')."
+  }
+}
+
+variable "aap_insecure_tls" {
+  description = "Allow insecure TLS connections to AAP (self-signed certificates)"
+  type        = bool
+  default     = true
+}
+
+variable "vault_addr" {
+  description = "Vault address for AAP to access (e.g., https://vault.example.com:8200)"
+  type        = string
+}
+
+variable "vault_token" {
+  description = "Vault token for AAP to access instance credentials"
+  type        = string
+  sensitive   = true
+}
+
+################################################################################
+# outputs.tf - Output Definitions
+################################################################################
 
 output "instance_id" {
-  description = "EC2 Instance ID"
+  description = "EC2 instance ID"
   value       = aws_instance.rhel.id
 }
 
 output "instance_public_ip" {
-  description = "Public IP address"
+  description = "Public IP address of the instance"
   value       = aws_instance.rhel.public_ip
 }
 
 output "instance_private_ip" {
-  description = "Private IP address"
+  description = "Private IP address of the instance"
   value       = aws_instance.rhel.private_ip
 }
 
+output "instance_public_dns" {
+  description = "Public DNS name of the instance"
+  value       = aws_instance.rhel.public_dns
+}
+
+output "security_group_id" {
+  description = "Security group ID"
+  value       = aws_security_group.rhel_sg.id
+}
+
 output "vault_secret_path" {
-  description = "Vault path where credentials are stored"
-  value       = "secret/instances/${aws_instance.rhel.id}/credentials"
+  description = "Path to instance credentials in Vault"
+  value       = "${var.vault_kv_mount}/rhel-instance-${var.instance_name}"
 }
 
-output "aap_inventory_id" {
-  description = "AAP Inventory ID"
-  value       = aap_inventory.terraform_inventory.id
+output "ssh_connection" {
+  description = "SSH connection string"
+  value       = "ssh ${var.instance_username}@${aws_instance.rhel.public_ip}"
 }
 
-output "aap_host_id" {
-  description = "AAP Host ID"
-  value       = aap_host.rhel_host.id
+output "web_urls" {
+  description = "Web access URLs"
+  value = {
+    http  = "http://${aws_instance.rhel.public_ip}"
+    https = "https://${aws_instance.rhel.public_ip}"
+  }
 }
 
-output "aap_job_id" {
-  description = "AAP Job ID that was launched"
-  value       = aap_job.configure_instance.id
+output "ami_id" {
+  description = "AMI ID used for the instance"
+  value       = data.aws_ami.rhel.id
 }
 
-output "aap_job_status" {
-  description = "AAP Job execution status"
-  value       = aap_job.configure_instance.status
+output "ami_name" {
+  description = "AMI name used for the instance"
+  value       = data.aws_ami.rhel.name
 }
 
-output "ssh_connection_command" {
-  description = "SSH command to connect"
-  value       = "ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_instance.rhel.public_ip}"
+output "instance_username" {
+  description = "Username for SSH access"
+  value       = var.instance_username
+}
+
+output "vault_credentials_command" {
+  description = "Command to retrieve credentials from Vault"
+  value       = "vault kv get ${var.vault_kv_mount}/rhel-instance-${var.instance_name}"
 }
